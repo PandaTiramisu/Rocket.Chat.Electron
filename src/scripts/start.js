@@ -1,171 +1,128 @@
-/* globals $ */
-
-import { remote, ipcRenderer } from 'electron';
-import i18n from '../i18n/index.js';
+import { ipcRenderer } from 'electron';
+import attachEvents from './events';
 import servers from './servers';
-import sidebar from './sidebar';
-import webview from './webview';
-import tray from './tray';
-import './menus';
+import i18n from '../i18n';
 
-sidebar.on('badge-setted', function () {
-    const badge = sidebar.getGlobalBadge();
 
-    if (process.platform === 'darwin') {
-        remote.app.dock.setBadge(badge);
-    }
-    tray.showTrayAlert(!isNaN(parseInt(badge)) && badge > 0, badge);
-});
+async function setupLanding() {
+	function handleConnectionStatus() {
+		document.body.classList[navigator.onLine ? 'remove' : 'add']('offline');
+	}
+	window.addEventListener('online', handleConnectionStatus);
+	window.addEventListener('offline', handleConnectionStatus);
+	handleConnectionStatus();
 
-export const start = function () {
-    const defaultInstance = 'https://open.rocket.chat';
+	const defaultInstance = 'https://open.rocket.chat';
 
-    // connection check
-    function online () {
-        document.body.classList.remove('offline');
-    }
+	document.querySelector('#login-card .connect__prompt').innerHTML = i18n.__('landing.inputUrl');
+	document.querySelector('#login-card #invalidUrl').innerHTML = i18n.__('error.noValidServerFound');
+	document.querySelector('#login-card .connect__error').innerHTML = i18n.__('error.offline');
+	document.querySelector('#login-card .login').innerHTML = i18n.__('landing.connect');
 
-    function offline () {
-        document.body.classList.add('offline');
-    }
+	const form = document.querySelector('#login-card');
+	const errorPane = form.querySelector('#invalidUrl');
+	const hostField = form.querySelector('[name="host"]');
+	const connectButton = form.querySelector('[type="submit"]');
 
-    if (!navigator.onLine) {
-        offline();
-    }
-    window.addEventListener('online', online);
-    window.addEventListener('offline', offline);
-    // end connection check
+	function validateHost() {
+		return new Promise(function(resolve, reject) {
+			function execValidation() {
+				errorPane.style.display = 'none';
+				hostField.classList.remove('wrong');
 
-    const form = document.querySelector('form');
-    const hostField = form.querySelector('[name="host"]');
-    const button = form.querySelector('[type="submit"]');
-    const invalidUrl = form.querySelector('#invalidUrl');
+				const host = hostField.value.trim();
+				hostField.value = host;
 
-    window.addEventListener('load', function () {
-        hostField.focus();
-    });
+				if (host.length === 0) {
+					connectButton.value = i18n.__('landing.connect');
+					connectButton.disabled = false;
+					resolve();
+					return;
+				}
 
-    function validateHost () {
-        return new Promise(function (resolve, reject) {
-            const execValidation = function () {
-                invalidUrl.style.display = 'none';
-                hostField.classList.remove('wrong');
+				connectButton.value = i18n.__('landing.validating');
+				connectButton.disabled = true;
 
-                let host = hostField.value.trim();
-                host = host.replace(/\/$/, '');
-                hostField.value = host;
+				servers.validateHost(host, 2000)
+					.then(() => {
+						connectButton.value = i18n.__('landing.connect');
+						connectButton.disabled = false;
+						resolve();
+					})
+					.catch(function(status) {
+						// If the url begins with HTTP, mark as invalid
+						if (/^https?:\/\/.+/.test(host) || status === 'basic-auth') {
+							connectButton.value = i18n.__('landing.invalidUrl');
+							errorPane.style.display = 'block';
+							switch (status) {
+								case 'basic-auth':
+									errorPane.innerHTML = i18n.__('error.authNeeded', { auth: 'username:password@host' });
+									break;
+								case 'invalid':
+									errorPane.innerHTML = i18n.__('error.noValidServerFound');
+									break;
+								case 'timeout':
+									errorPane.innerHTML = i18n.__('error.connectTimeout');
+									break;
+							}
+							hostField.classList.add('wrong');
+							reject();
+							return;
+						}
 
-                if (host.length === 0) {
-                    button.value = i18n.__('Connect');
-                    button.disabled = false;
-                    resolve();
-                    return;
-                }
+						// If the url isn't localhost, don't have dots and don't have protocol
+						// try as a .rocket.chat subdomain
+						if (!/(^https?:\/\/)|(\.)|(^([^:]+:[^@]+@)?localhost(:\d+)?$)/.test(host)) {
+							hostField.value = `https://${ host }.rocket.chat`;
+							return execValidation();
+						}
 
-                button.value = i18n.__('Validating');
-                button.disabled = true;
+						// If the url don't start with protocol try HTTPS
+						if (!/^https?:\/\//.test(host)) {
+							hostField.value = `https://${ host }`;
+							return execValidation();
+						}
+					});
+			}
+			execValidation();
+		});
+	}
 
-                servers.validateHost(host, 2000).then(function () {
-                    button.value = i18n.__('Connect');
-                    button.disabled = false;
-                    resolve();
-                }, function (status) {
-                    // If the url begins with HTTP, mark as invalid
-                    if (/^https?:\/\/.+/.test(host) || status === 'basic-auth') {
-                        button.value = i18n.__('Invalid_url');
-                        invalidUrl.style.display = 'block';
-                        switch (status) {
-                            case 'basic-auth':
-                                invalidUrl.innerHTML = i18n.__('Auth_needed_try', '<b>username:password@host</b>');
-                                break;
-                            case 'invalid':
-                                invalidUrl.innerHTML = i18n.__('No_valid_server_found');
-                                break;
-                            case 'timeout':
-                                invalidUrl.innerHTML = i18n.__('Timeout_trying_to_connect');
-                                break;
-                        }
-                        hostField.classList.add('wrong');
-                        reject();
-                        return;
-                    }
+	window.addEventListener('load', () => hostField.focus());
 
-                    // // If the url begins with HTTPS, fallback to HTTP
-                    // if (/^https:\/\/.+/.test(host)) {
-                    //     hostField.value = host.replace('https://', 'http://');
-                    //     return execValidation();
-                    // }
+	hostField.addEventListener('blur', () => {
+		validateHost().then(function() {}, function() {});
+	});
 
-                    // If the url isn't localhost, don't have dots and don't have protocol
-                    // try as a .rocket.chat subdomain
-                    if (!/(^https?:\/\/)|(\.)|(^([^:]+:[^@]+@)?localhost(:\d+)?$)/.test(host)) {
-                        hostField.value = `https://${host}.rocket.chat`;
-                        return execValidation();
-                    }
+	ipcRenderer.on('certificate-reload', (event, url) => {
+		hostField.value = url.replace(/\/api\/info$/, '');
+		validateHost().then(function() {}, function() {});
+	});
 
-                    // If the url don't start with protocol try HTTPS
-                    if (!/^https?:\/\//.test(host)) {
-                        hostField.value = `https://${host}`;
-                        return execValidation();
-                    }
-                });
-            };
-            execValidation();
-        });
-    }
+	form.addEventListener('submit', (event) => {
+		event.preventDefault();
+		event.stopPropagation();
 
-    hostField.addEventListener('blur', function () {
-        validateHost().then(function () {}, function () {});
-    });
+		validateHost().then(function() {
+			const input = form.querySelector('[name="host"]');
+			let url = input.value;
 
-    ipcRenderer.on('certificate-reload', function (event, url) {
-        hostField.value = url.replace(/\/api\/info$/, '');
-        validateHost().then(function () {}, function () {});
-    });
+			if (url.length === 0) {
+				url = defaultInstance;
+			}
 
-    const submit = function () {
-        validateHost().then(function () {
-            const input = form.querySelector('[name="host"]');
-            let url = input.value;
+			url = servers.addHost(url);
+			if (url !== false) {
+				servers.setActive(url);
+			}
 
-            if (url.length === 0) {
-                url = defaultInstance;
-            }
+			input.value = '';
+		}, function() {});
+	});
+}
 
-            url = servers.addHost(url);
-            if (url !== false) {
-                sidebar.show();
-                servers.setActive(url);
-            }
-
-            input.value = '';
-        }, function () {});
-    };
-
-    hostField.addEventListener('keydown', function (ev) {
-        if (ev.which === 13) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            submit();
-            return false;
-        }
-    });
-
-    form.addEventListener('submit', function (ev) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        submit();
-        return false;
-    });
-
-    $('.add-server').on('click', function () {
-        servers.clearActive();
-        webview.showLanding();
-    });
-
-    servers.restoreActive();
-};
-
-window.addEventListener('focus', function () {
-    webview.focusActive();
-});
+export async function start() {
+	await i18n.initialize();
+	await setupLanding();
+	await attachEvents();
+}
