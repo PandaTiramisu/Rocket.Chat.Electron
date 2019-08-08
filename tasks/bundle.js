@@ -1,56 +1,68 @@
-'use strict';
-
-const path = require('path');
+const builtinModules = require('builtin-modules');
 const jetpack = require('fs-jetpack');
-const rollup = require('rollup').rollup;
+const path = require('path');
+const { rollup } = require('rollup');
+const commonjs = require('rollup-plugin-commonjs');
+const istanbul = require('rollup-plugin-istanbul');
+const json = require('rollup-plugin-json');
+const nodeResolve = require('rollup-plugin-node-resolve');
+const replace = require('rollup-plugin-replace');
+const appManifest = require('../package.json');
 
-const nodeBuiltInModules = ['assert', 'buffer', 'child_process', 'cluster',
-    'console', 'constants', 'crypto', 'dgram', 'dns', 'domain', 'events',
-    'fs', 'http', 'https', 'module', 'net', 'os', 'path', 'process', 'punycode',
-    'querystring', 'readline', 'repl', 'stream', 'string_decoder', 'timers',
-    'tls', 'tty', 'url', 'util', 'v8', 'vm', 'zlib'];
-
-const electronBuiltInModules = ['electron'];
-
-const generateExternalModulesList = function () {
-    const appManifest = jetpack.read('./package.json', 'json');
-    return [].concat(
-        nodeBuiltInModules,
-        electronBuiltInModules,
-        Object.keys(appManifest.dependencies),
-        Object.keys(appManifest.devDependencies)
-    );
-};
 
 const cached = {};
 
-module.exports = function (src, dest, opts) {
-    opts = opts || {};
-    opts.rollupPlugins = opts.rollupPlugins || [];
-    return rollup({
-        input: src,
-        external: generateExternalModulesList(),
-        cache: cached[src],
-        plugins: opts.rollupPlugins,
-    })
-        .then(function (bundle) {
-            cached[src] = bundle;
+const bundle = async(src, dest, { coverage = false, env = 'development' } = {}) => {
+	const inputOptions = {
+		input: src,
+		external: [
+			...builtinModules,
+			...Object.keys(appManifest.dependencies),
+			...Object.keys(appManifest.devDependencies),
+		],
+		cache: cached[src],
+		plugins: [
+			...(coverage ? [
+				istanbul({
+					exclude: ['**/*.spec.js', '**/*.specs.js'],
+					sourcemap: true,
+				}),
+			] : []),
+			json(),
+			replace({
+				'process.env.NODE_ENV': JSON.stringify(env),
+			}),
+			nodeResolve(),
+			commonjs(),
+		],
+	};
 
-            const jsFile = path.basename(dest);
-            return bundle.generate({
-                format: 'cjs',
-                sourcemap: true,
-                sourcemapFile: jsFile,
-            });
-        })
-        .then(function (result) {
-            // Wrap code in self invoking function so the variables don't
-            // pollute the global namespace.
-            const isolatedCode = '(function () {' + result.code + '\n}());';
-            const jsFile = path.basename(dest);
-            return Promise.all([
-                jetpack.writeAsync(dest, isolatedCode + '\n//# sourcemappingURL=' + jsFile + '.map'),
-                jetpack.writeAsync(dest + '.map', result.map.toString()),
-            ]);
-        });
+	const outputOptions = {
+		format: 'cjs',
+		file: dest,
+		intro: '(function () {',
+		outro: '})()',
+		sourcemap: true,
+		sourcemapFile: path.basename(dest),
+	};
+
+	const bundle = await rollup(inputOptions);
+	cached[src] = bundle;
+	await bundle.write(outputOptions);
 };
+
+const bundleMany = async(srcDirPath, matching, dest, options) => {
+	const srcDir = jetpack.cwd(srcDirPath);
+	const src = srcDir.path(path.basename(dest));
+
+	const entryFileContent = (await srcDir.findAsync({ matching }))
+		.map((path) => `import './${ path.replace(/\\/g, '/') }';`)
+		.join('\n');
+
+	await jetpack.writeAsync(src, entryFileContent);
+	await bundle(src, dest, options);
+	await jetpack.removeAsync(src);
+};
+
+module.exports = bundle;
+module.exports.many = bundleMany;
